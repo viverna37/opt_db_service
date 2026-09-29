@@ -44,6 +44,10 @@ class Database:
                 if conn.dialect.name == "postgresql":
                     await conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
                 await conn.run_sync(Base.metadata.create_all)
+                if conn.dialect.name == "postgresql":
+                    from app.database.migrations import apply
+
+                    await apply(conn)
                 logger.info("Таблицы созданы/проверены")
         except Exception:
             logger.exception("Ошибка при создании таблиц")

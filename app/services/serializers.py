@@ -5,6 +5,7 @@ from app.database.models import (
     AttributeDefinition,
     AttributeScope,
     Order,
+    PriceBasis,
     PriceTier,
     Product,
     Tenant,
@@ -18,9 +19,10 @@ from app.services.catalog_service import (
     ask_manager_url,
     attribute_values,
     contact_url,
+    tier_price,
     to_pricing_tiers,
 )
-from app.services.pricing import PriceTable, find_next_tier, min_price, resolve_tier, tier_prices
+from app.services.pricing import PriceTable, Tier, find_next_tier, min_price, resolve_tier, sort_tiers, tier_prices
 from app.utils.file_storage import file_url
 
 
@@ -35,6 +37,7 @@ def tenant_response(tenant: Tenant) -> TenantResponse:
     return TenantResponse(
         **tenant_public(tenant).model_dump(),
         manager_username=tenant.manager_username, access_mode=tenant.access_mode, age_gate=tenant.age_gate,
+        price_basis=tenant.price_basis,
         min_order_amount=tenant.min_order_amount, low_stock_threshold=tenant.low_stock_threshold,
         catalog_updated_at=tenant.catalog_updated_at,
     )
@@ -78,25 +81,33 @@ def product_list_item(
     )
 
 
-def _tier_prices(tiers: Sequence[PriceTier], table: PriceTable, variant_id: int | None) -> list[TierPrice]:
-    return [
-        TierPrice(tier_id=tier.id, label=tier.label, min_qty=tier.min_qty, amount=amount)
-        for tier, amount in tier_prices(to_pricing_tiers(tiers), table, variant_id)
-    ]
+def _tier_prices(tiers: list[Tier], basis: PriceBasis, table: PriceTable, variant_id: int | None) -> list[TierPrice]:
+    return [tier_price(tier, basis, amount) for tier, amount in tier_prices(tiers, table, variant_id)]
 
 
 def product_card(
     tenant: Tenant, product: Product, definitions: Sequence[AttributeDefinition], tiers: Sequence[PriceTier],
     table: PriceTable, brand_names: dict[int, str], cart_qty: dict[int, int], include_hidden_variants: bool = False,
+    amount_tier_id: int | None = None,
 ) -> ProductCard:
+    """
+    Карточка. Текущий уровень: qty — по количеству этого товара в корзине;
+    amount — уровень всей заявки (amount_tier_id из cart_service), подсказка
+    «ещё N шт» в этом режиме не нужна — она на уровне корзины.
+    """
     variants = [v for v in product.variants if v.is_visible or include_hidden_variants]
     product_defs = [d for d in definitions if d.scope == AttributeScope.product]
     variant_defs = [d for d in definitions if d.scope == AttributeScope.variant]
     in_cart = sum(cart_qty.get(v.id, 0) for v in variants)
-    pricing_tiers = to_pricing_tiers(tiers)
-    current = resolve_tier(pricing_tiers, in_cart)
-    upcoming = find_next_tier(pricing_tiers, in_cart)
-    product_prices = _tier_prices(tiers, table, None)
+    basis = tenant.price_basis
+    pricing_tiers = to_pricing_tiers(tiers, basis)
+    if basis == PriceBasis.amount:
+        current = next((t for t in pricing_tiers if t.id == amount_tier_id), sort_tiers(pricing_tiers)[0] if pricing_tiers else None)
+        upcoming = None
+    else:
+        current = resolve_tier(pricing_tiers, in_cart)
+        upcoming = find_next_tier(pricing_tiers, in_cart)
+    product_prices = _tier_prices(pricing_tiers, basis, table, None)
     return ProductCard(
         id=product.id,
         name=product.name,
@@ -109,14 +120,14 @@ def product_card(
         tiers=product_prices,
         current_tier_id=current.id if current else None,
         next_tier=next((p for p in product_prices if upcoming and p.tier_id == upcoming.id), None),
-        qty_to_next_tier=(upcoming.min_qty - in_cart) if upcoming else None,
+        qty_to_next_tier=(upcoming.threshold - in_cart) if upcoming else None,
         in_cart_qty=in_cart,
         variants=[
             VariantCard(
                 id=v.id, name=v.name, sku=v.sku, is_default=v.is_default,
                 attributes=attribute_values(variant_defs, v.attributes),
                 stock_status=v.stock_status, stock_qty=v.stock_qty,
-                prices=_tier_prices(tiers, table, v.id), in_cart_qty=cart_qty.get(v.id, 0),
+                prices=_tier_prices(pricing_tiers, basis, table, v.id), in_cart_qty=cart_qty.get(v.id, 0),
             )
             for v in variants
         ],

@@ -3,17 +3,22 @@
 отображает). Чистые функции без БД — данные подгружает
 app/services/cart_service.py.
 
-Правила:
-- Уровень цены товара определяется суммарным количеством ВСЕХ вариантов
-  этого товара в корзине: берётся уровень с максимальным min_qty <= qty.
-  Если qty меньше порога самого младшего уровня — всё равно применяется
-  самый младший (порог уровня — не минимальная партия).
-- Цена варианта на уровне: переопределение варианта на этом уровне, иначе
-  цена товара на этом уровне. Если на этом уровне цены нет ни там, ни там —
-  спускаемся к ближайшему младшему уровню, где она есть (у оптовика может
-  быть заполнен, например, только «от 1 шт»).
-- Нет цены вообще — None («цена по запросу»): позиция отображается, но в
-  заявку такую не отправить (см. cart_service.CartView.problems).
+Два режима уровней цен (Tenant.price_basis), порог уровня — Tier.threshold:
+- qty: уровень определяется суммарным количеством ВСЕХ вариантов товара в
+  корзине, у каждого товара свой уровень (threshold — штуки).
+- amount: уровень общий на всю заявку и определяется её суммой (threshold —
+  копейки), как у оптовиков «от 3 000 / от 10 000 ₽». Сумма зависит от
+  уровня, поэтому уровень выбирается сверху вниз: самый старший, для которого
+  сумма заявки В ЕГО ЦЕНАХ не меньше его порога (resolve_amount_tier).
+
+Правила цены варианта на уровне:
+- переопределение варианта на этом уровне, иначе цена товара на этом уровне;
+- нет на этом уровне — ближайший младший уровень, где цена есть (у оптовика
+  может быть заполнен, например, только «от 1 шт»);
+- нет и ниже — ближайший старший (у товара нет розничной цены, а заявка на
+  розничном уровне: берём минимальную оптовую, а не «цена по запросу»);
+- нет вообще — None («цена по запросу»): позиция отображается, но в заявку
+  такую не отправить (см. cart_service.CartView).
 """
 from dataclasses import dataclass, field
 
@@ -22,7 +27,7 @@ from dataclasses import dataclass, field
 class Tier:
     id: int
     label: str
-    min_qty: int
+    threshold: int  # штуки (qty) или копейки (amount)
 
 
 @dataclass
@@ -50,24 +55,35 @@ class GroupPrice:
     subtotal: int  # сумма позиций, у которых есть цена
 
 
+@dataclass
+class AmountPricing:
+    """Режим amount: общий уровень заявки и цены по каждому товару на нём"""
+    tier: Tier | None
+    next_tier: Tier | None
+    amount_to_next_tier: int | None  # копейки: сколько добавить до следующего уровня
+    groups: list[GroupPrice]
+    total: int
+
+
 def sort_tiers(tiers: list[Tier]) -> list[Tier]:
-    return sorted(tiers, key=lambda t: t.min_qty)
+    return sorted(tiers, key=lambda t: t.threshold)
 
 
-def resolve_tier(tiers: list[Tier], qty: int) -> Tier | None:
+def resolve_tier(tiers: list[Tier], value: int) -> Tier | None:
+    """Старший уровень с порогом <= value; меньше младшего порога — всё равно младший (порог — не минимальная партия)"""
     ordered = sort_tiers(tiers)
     if not ordered:
         return None
     current = ordered[0]
     for tier in ordered:
-        if tier.min_qty <= qty:
+        if tier.threshold <= value:
             current = tier
     return current
 
 
-def find_next_tier(tiers: list[Tier], qty: int) -> Tier | None:
+def find_next_tier(tiers: list[Tier], value: int) -> Tier | None:
     for tier in sort_tiers(tiers):
-        if tier.min_qty > qty:
+        if tier.threshold > value:
             return tier
     return None
 
@@ -77,17 +93,24 @@ def unit_price(tiers: list[Tier], table: PriceTable, variant_id: int | None, tie
         return None
     ordered = sort_tiers(tiers)
     overrides = table.variants.get(variant_id, {}) if variant_id is not None else {}
-    # от текущего уровня вниз к младшим
-    for candidate in reversed([t for t in ordered if t.min_qty <= tier.min_qty]):
+
+    def price_at(candidate: Tier) -> int | None:
         if candidate.id in overrides:
             return overrides[candidate.id]
-        if candidate.id in table.product:
-            return table.product[candidate.id]
+        return table.product.get(candidate.id)
+
+    # от текущего уровня вниз к младшим, затем вверх к старшим
+    below = [t for t in ordered if t.threshold <= tier.threshold]
+    above = [t for t in ordered if t.threshold > tier.threshold]
+    for candidate in [*reversed(below), *above]:
+        price = price_at(candidate)
+        if price is not None:
+            return price
     return None
 
 
 def tier_prices(tiers: list[Tier], table: PriceTable, variant_id: int | None = None) -> list[tuple[Tier, int | None]]:
-    """Плитки уровней на карточке: цена на каждом уровне (с тем же откатом к младшему)."""
+    """Плитки уровней на карточке: цена на каждом уровне (с тем же откатом)."""
     return [(tier, unit_price(tiers, table, variant_id, tier)) for tier in sort_tiers(tiers)]
 
 
@@ -99,14 +122,8 @@ def min_price(table: PriceTable) -> int | None:
     return min(amounts) if amounts else None
 
 
-def price_group(tiers: list[Tier], table: PriceTable, lines: list[tuple[int, int]]) -> GroupPrice:
-    """
-    lines — [(variant_id, qty)] одного товара. Возвращает текущий уровень,
-    следующий уровень с подсказкой «ещё N шт» и цены по строкам.
-    """
-    total_qty = sum(qty for _, qty in lines)
-    tier = resolve_tier(tiers, total_qty)
-    next_tier = find_next_tier(tiers, total_qty)
+def price_lines_at(tiers: list[Tier], table: PriceTable, lines: list[tuple[int, int]], tier: Tier | None) -> GroupPrice:
+    """Строки одного товара по ценам заданного уровня (next_tier/qty_to_next_tier не заполняются)"""
     priced: list[LinePrice] = []
     subtotal = 0
     for variant_id, qty in lines:
@@ -116,10 +133,53 @@ def price_group(tiers: list[Tier], table: PriceTable, lines: list[tuple[int, int
             subtotal += amount
         priced.append(LinePrice(variant_id=variant_id, qty=qty, unit_price=price, amount=amount))
     return GroupPrice(
-        total_qty=total_qty,
-        tier=tier,
-        next_tier=next_tier,
-        qty_to_next_tier=(next_tier.min_qty - total_qty) if next_tier else None,
-        lines=priced,
-        subtotal=subtotal,
+        total_qty=sum(qty for _, qty in lines), tier=tier, next_tier=None, qty_to_next_tier=None,
+        lines=priced, subtotal=subtotal,
     )
+
+
+def price_group(tiers: list[Tier], table: PriceTable, lines: list[tuple[int, int]]) -> GroupPrice:
+    """
+    Режим qty. lines — [(variant_id, qty)] одного товара. Возвращает текущий
+    уровень, следующий уровень с подсказкой «ещё N шт» и цены по строкам.
+    """
+    total_qty = sum(qty for _, qty in lines)
+    tier = resolve_tier(tiers, total_qty)
+    next_tier = find_next_tier(tiers, total_qty)
+    group = price_lines_at(tiers, table, lines, tier)
+    group.next_tier = next_tier
+    group.qty_to_next_tier = (next_tier.threshold - total_qty) if next_tier else None
+    return group
+
+
+def resolve_amount_tier(tiers: list[Tier], groups: list[tuple[PriceTable, list[tuple[int, int]]]]) -> AmountPricing:
+    """
+    Режим amount. groups — [(цены товара, [(variant_id, qty)])] всей заявки.
+    Уровень — самый старший, для которого сумма заявки в его ценах >= его
+    порога; если ни один не проходит — младший. Следующий уровень и
+    «сколько добавить» считаются в ценах следующего уровня.
+    """
+    ordered = sort_tiers(tiers)
+
+    def at(tier: Tier | None) -> tuple[list[GroupPrice], int]:
+        priced = [price_lines_at(tiers, table, lines, tier) for table, lines in groups]
+        return priced, sum(g.subtotal for g in priced)
+
+    if not ordered:
+        priced, total = at(None)
+        return AmountPricing(tier=None, next_tier=None, amount_to_next_tier=None, groups=priced, total=total)
+
+    chosen = ordered[0]
+    for tier in reversed(ordered):
+        _, total = at(tier)
+        if total >= tier.threshold:
+            chosen = tier
+            break
+    priced, total = at(chosen)
+
+    next_tier = next((t for t in ordered if t.threshold > chosen.threshold), None)
+    to_next = None
+    if next_tier is not None and total > 0:
+        _, total_next = at(next_tier)
+        to_next = max(next_tier.threshold - total_next, 1)
+    return AmountPricing(tier=chosen, next_tier=next_tier, amount_to_next_tier=to_next, groups=priced, total=total)

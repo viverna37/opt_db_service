@@ -3,7 +3,7 @@ from typing import Generic, Optional, TypeVar
 
 from pydantic import BaseModel, ConfigDict
 
-from app.database.models import AccessMode, MemberStatus, Role
+from app.database.models import AccessMode, MemberStatus, PriceBasis, Role
 
 T = TypeVar("T")
 
@@ -41,6 +41,7 @@ class TenantResponse(TenantPublicResponse):
     manager_username: Optional[str] = None
     access_mode: AccessMode
     age_gate: bool
+    price_basis: PriceBasis
     min_order_amount: Optional[int] = None
     low_stock_threshold: int
     catalog_updated_at: datetime

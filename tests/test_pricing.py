@@ -13,7 +13,7 @@ def test_tier_by_total_qty_of_product():
 
 
 def test_qty_below_lowest_threshold_still_gets_lowest_tier():
-    assert resolve_tier([Tier(1, "от 5 шт", 5)], 2).min_qty == 5
+    assert resolve_tier([Tier(1, "от 5 шт", 5)], 2).threshold == 5
     assert resolve_tier([], 10) is None
 
 
@@ -51,3 +51,40 @@ def test_no_price_at_all_is_none():
 def test_min_price_for_list():
     assert min_price(PriceTable(product={1: 26000, 3: 24000}, variants={5: {1: 23000}})) == 23000
     assert min_price(PriceTable()) is None
+
+
+# ---------- Режим amount: уровень по сумме заявки ----------
+
+R, W3, W10 = Tier(10, "розница", 100000), Tier(11, "от 3 000 ₽", 300000), Tier(12, "от 10 000 ₽", 1000000)
+AMOUNT_TIERS = [W10, R, W3]
+
+
+def test_amount_tier_uses_total_in_that_tier_prices():
+    from app.services.pricing import resolve_amount_tier
+
+    table = PriceTable(product={10: 90000, 11: 46000, 12: 45000})  # 900 / 460 / 450 ₽
+    # 5 шт: в оптовых ценах 2 300 ₽ < 3 000 — уровень «розница», 4 500 ₽
+    res = resolve_amount_tier(AMOUNT_TIERS, [(table, [(1, 5)])])
+    assert res.tier == R and res.total == 5 * 90000
+    assert res.next_tier == W3 and res.amount_to_next_tier == 300000 - 5 * 46000
+    # 7 шт: 3 220 ₽ в ценах «от 3 000» — проходит, хотя в розничных было бы 6 300
+    res = resolve_amount_tier(AMOUNT_TIERS, [(table, [(1, 7)])])
+    assert res.tier == W3 and res.total == 7 * 46000
+    # 23 шт: в ценах «от 10 000» 10 350 ₽ — старший уровень, дальше некуда
+    res = resolve_amount_tier(AMOUNT_TIERS, [(table, [(1, 23)])])
+    assert res.tier == W10 and res.next_tier is None and res.amount_to_next_tier is None
+
+
+def test_amount_tier_counts_whole_cart_across_products():
+    from app.services.pricing import resolve_amount_tier
+
+    a = PriceTable(product={10: 50000, 11: 20000})
+    b = PriceTable(product={10: 80000, 11: 40000})
+    res = resolve_amount_tier(AMOUNT_TIERS, [(a, [(1, 5)]), (b, [(2, 5)])])  # 1 000 + 2 000 = 3 000 ₽ в оптовых
+    assert res.tier == W3 and [g.subtotal for g in res.groups] == [100000, 200000]
+
+
+def test_no_lower_price_falls_back_to_nearest_higher():
+    # у жидкостей нет розничной цены — на розничном уровне берём цену «от 3 000», а не «по запросу»
+    table = PriceTable(product={11: 26000, 12: 25500})
+    assert unit_price(AMOUNT_TIERS, table, 1, R) == 26000

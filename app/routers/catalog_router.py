@@ -2,7 +2,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, Query, Request, status
 
-from app.database.models import Tenant, TenantUser
+from app.database.models import PriceBasis, Tenant, TenantUser
 from app.database.repository.main_repository import Repository
 from app.database.repository.product_repository import SORTS, ProductFilter
 from app.deps import api_error, get_client, get_repository, get_tenant
@@ -16,7 +16,7 @@ from app.models.catalog_models import (
     ProductListItem,
 )
 from app.models.common_models import Page
-from app.services.cart_service import cart_qty_by_variant
+from app.services.cart_service import build_cart_view, cart_qty_by_variant
 from app.services.catalog_service import (
     ancestor_chain,
     build_category_tree,
@@ -161,8 +161,12 @@ async def get_product(
     if not product or not product.is_visible:
         raise api_error(status.HTTP_404_NOT_FOUND, "not_found", "Товар не найден")
     tables = await repo.price.tables([product.id])
+    amount_tier_id = None
+    if tenant.price_basis == PriceBasis.amount:
+        # уровень общий на заявку — нужен расчёт всей корзины
+        amount_tier_id = (await build_cart_view(repo, tenant, await repo.cart.get_for_member(member.id))).amount_tier_id
     return product_card(
         tenant, product, await repo.attribute.list(tenant.id), await repo.price_tier.list(tenant.id),
         tables[product.id], {b.id: b.name for b in await repo.brand.list(tenant.id)},
-        await cart_qty_by_variant(repo, member.id),
+        await cart_qty_by_variant(repo, member.id), amount_tier_id=amount_tier_id,
     )

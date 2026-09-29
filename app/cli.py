@@ -6,6 +6,7 @@ CLI для того, что не делается из мини-аппа: зав
     python -m app.cli set-bot --slug amigo --bot-token 123:ABC --bot-username amigo_opt_bot
     python -m app.cli set-owner --slug amigo --telegram-id 123456789
     python -m app.cli seed-demo --slug demo --owner-telegram-id 123456789
+    python -m app.cli import-price --slug amigo --file "AMIGO OPT.xlsx" [--wipe] [--no-photos] [--dry-run]
 
 В докере: docker compose exec opt_catalog_db_service python -m app.cli ...
 """
@@ -142,6 +143,36 @@ async def seed_demo(repo: Repository, args) -> None:
     print(f"Демо-тенант создан: slug={args.slug} id={tenant.id}")
 
 
+async def import_price(repo: Repository, args) -> None:
+    """Блочный прайс (формат Amigo Opt) -> каталог тенанта, см. app/services/price_import.py"""
+    from app.importer.block_price import parse_workbook
+    from app.services.price_import import ImportError_, import_block_price
+    from app.utils.file_storage import LocalStorage
+
+    tenant = await _tenant(repo, args.slug)
+    with open(args.file, "rb") as f:
+        parsed = parse_workbook(f.read(), with_images=not args.no_photos)
+    products = parsed.products
+    print(f"Разобрано: листов {len(parsed.sheets)}, товаров {len(products)}, "
+          f"вариантов {sum(len(p.variants) for p in products)}, фото {sum(1 for p in products if p.image)}")
+    for warning in parsed.warnings:
+        print(f"  ! {warning}")
+    if args.dry_run:
+        print("--dry-run: в базу ничего не записано")
+        return
+    storage = None if args.no_photos else LocalStorage(get_cached_config().uploads_dir)
+    try:
+        stats = await import_block_price(repo, tenant, parsed, storage, wipe=args.wipe)
+    except ImportError_ as exc:
+        sys.exit(str(exc))
+    print(
+        f"Готово: категорий +{stats.categories_created}, брендов +{stats.brands_created}, уровней +{stats.tiers_created}; "
+        f"товаров +{stats.products_created} / обновлено {stats.products_updated} / скрыто {stats.products_hidden}; "
+        f"вариантов +{stats.variants_created} / скрыто {stats.variants_hidden}; фото +{stats.photos_added}"
+        + (f" (ошибок {stats.photo_errors})" if stats.photo_errors else "")
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="python -m app.cli")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -170,6 +201,14 @@ def main() -> None:
     p.add_argument("--bot-token")
     p.add_argument("--bot-username")
     p.set_defaults(action=seed_demo)
+
+    p = sub.add_parser("import-price")
+    p.add_argument("--slug", required=True)
+    p.add_argument("--file", required=True)
+    p.add_argument("--wipe", action="store_true", help="удалить весь каталог тенанта перед импортом")
+    p.add_argument("--no-photos", action="store_true")
+    p.add_argument("--dry-run", action="store_true", help="только разобрать и показать итог")
+    p.set_defaults(action=import_price)
 
     args = parser.parse_args()
     asyncio.run(_with_repo(args.action, args))

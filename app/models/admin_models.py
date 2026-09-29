@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from app.database.models import (
     AccessMode,
     AttributeScope,
+    PriceBasis,
     AttributeType,
     MemberStatus,
     Role,
@@ -228,14 +229,17 @@ class BrandWriteRequest(BaseModel):
 
 
 class PriceTierWriteRequest(BaseModel):
+    """Порог по режиму тенанта: min_qty (штуки) или min_amount (копейки)"""
     label: str = Field(..., min_length=1, max_length=50)
-    min_qty: int = Field(..., ge=1)
+    min_qty: Optional[int] = Field(None, ge=1)
+    min_amount: Optional[int] = Field(None, ge=0)
     sort_order: int = 0
 
 
 class PriceTierUpdateRequest(BaseModel):
     label: Optional[str] = Field(None, min_length=1, max_length=50)
     min_qty: Optional[int] = Field(None, ge=1)
+    min_amount: Optional[int] = Field(None, ge=0)
     sort_order: Optional[int] = None
 
 
@@ -254,6 +258,7 @@ class TenantSettingsResponse(BaseModel):
     low_stock_threshold: int
     access_mode: AccessMode
     age_gate: bool
+    price_basis: PriceBasis
     min_order_amount: Optional[int] = None
     welcome_text: Optional[str] = None
     bot_username: Optional[str] = None
@@ -269,6 +274,7 @@ class TenantSettingsUpdateRequest(BaseModel):
     low_stock_threshold: Optional[int] = Field(None, ge=0)
     access_mode: Optional[AccessMode] = None
     age_gate: Optional[bool] = None
+    price_basis: Optional[PriceBasis] = None
     min_order_amount: Optional[int] = Field(None, ge=0)
     welcome_text: Optional[str] = Field(None, max_length=2000)
 

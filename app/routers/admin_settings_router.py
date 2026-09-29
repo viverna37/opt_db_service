@@ -10,6 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from app.config.config import Config
 from app.database.models import (
     AttributeType,
+    PriceBasis,
     PriceTier,
     Tenant,
     TenantUser,
@@ -344,13 +345,36 @@ async def create_price_tier(
     admin: TenantUser = Depends(get_admin),
     repo: Repository = Depends(get_repository),
 ):
-    if await repo.price_tier.get_by_min_qty(tenant.id, data.min_qty):
+    fields = _tier_threshold(tenant, data.model_dump())
+    duplicate = (
+        await repo.price_tier.get_by_min_amount(tenant.id, fields["min_amount"])
+        if tenant.price_basis == PriceBasis.amount
+        else await repo.price_tier.get_by_min_qty(tenant.id, fields["min_qty"])
+    )
+    if duplicate:
         raise api_error(status.HTTP_409_CONFLICT, "duplicate", "Уровень с таким порогом уже есть")
-    tier = await repo.price_tier.create(tenant.id, **data.model_dump())
-    await repo.audit.log(tenant.id, admin.id, "create", "price_tier", tier.id, {"min_qty": tier.min_qty})
+    tier = await repo.price_tier.create(tenant.id, **fields)
+    await repo.audit.log(tenant.id, admin.id, "create", "price_tier", tier.id, {"label": tier.label})
     await repo.tenant.touch_catalog(tenant.id)
     await _commit_unique(repo, "Уровень с таким порогом уже есть")
     return tier
+
+
+def _tier_threshold(tenant: Tenant, fields: dict, partial: bool = False) -> dict:
+    """Порог уровня — в поле своего режима, чужое поле обнуляется"""
+    if tenant.price_basis == PriceBasis.amount:
+        if fields.get("min_amount") is None and not partial:
+            raise api_error(status.HTTP_422_UNPROCESSABLE_ENTITY, "threshold_required", "Укажите сумму заявки, от которой действует уровень")
+        fields.pop("min_qty", None)
+        if not partial or "min_amount" in fields:
+            fields["min_qty"] = None
+    else:
+        if fields.get("min_qty") is None and not partial:
+            raise api_error(status.HTTP_422_UNPROCESSABLE_ENTITY, "threshold_required", "Укажите количество, от которого действует уровень")
+        fields.pop("min_amount", None)
+        if not partial or "min_qty" in fields:
+            fields["min_amount"] = None
+    return fields
 
 
 async def _tier(repo: Repository, tenant: Tenant, tier_id: int) -> PriceTier:
@@ -369,7 +393,7 @@ async def update_price_tier(
     repo: Repository = Depends(get_repository),
 ):
     tier = await _tier(repo, tenant, tier_id)
-    fields = data.model_dump(exclude_unset=True)
+    fields = _tier_threshold(tenant, data.model_dump(exclude_unset=True), partial=True)
     for key, value in fields.items():
         setattr(tier, key, value)
     await repo.audit.log(tenant.id, admin.id, "update", "price_tier", tier.id, {"fields": sorted(fields)})
@@ -400,6 +424,7 @@ def _settings(tenant: Tenant) -> TenantSettingsResponse:
         slug=tenant.slug, name=tenant.name, logo_url=file_url(tenant.logo_key), accent_color=tenant.accent_color,
         currency=tenant.currency, timezone=tenant.timezone, manager_username=tenant.manager_username,
         low_stock_threshold=tenant.low_stock_threshold, access_mode=tenant.access_mode, age_gate=tenant.age_gate,
+        price_basis=tenant.price_basis,
         min_order_amount=tenant.min_order_amount, welcome_text=tenant.welcome_text,
         bot_username=tenant.bot_username, bot_configured=bool(tenant.bot_token),
     )
@@ -421,6 +446,11 @@ async def update_settings(
     fields = data.model_dump(exclude_unset=True)
     if "timezone" in fields and safe_zone(fields["timezone"]).key != fields["timezone"]:
         raise api_error(status.HTTP_422_UNPROCESSABLE_ENTITY, "invalid_timezone", "Неизвестный часовой пояс")
+    if fields.get("price_basis") and fields["price_basis"] != tenant.price_basis and await repo.price_tier.list(tenant.id):
+        raise api_error(
+            status.HTTP_409_CONFLICT, "tiers_exist",
+            "Чтобы сменить режим уровней цен, сначала удалите текущие уровни — их пороги в другом формате",
+        )
     if "manager_username" in fields and fields["manager_username"]:
         fields["manager_username"] = fields["manager_username"].strip().lstrip("@")
     for key, value in fields.items():

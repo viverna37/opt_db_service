@@ -62,6 +62,12 @@ class AccessMode(str, enum.Enum):
     approval = "approval"
 
 
+class PriceBasis(str, enum.Enum):
+    """От чего зависит уровень цены (см. app/services/pricing.py)"""
+    qty = "qty"  # количество штук товара в корзине
+    amount = "amount"  # сумма всей заявки
+
+
 class AttributeType(str, enum.Enum):
     text = "text"
     number = "number"
@@ -124,6 +130,9 @@ class Tenant(Base):
         SAEnum(AccessMode, name="access_mode"), default=AccessMode.open, nullable=False
     )
     age_gate: Mapped[bool] = mapped_column(default=True, nullable=False)
+    price_basis: Mapped[PriceBasis] = mapped_column(
+        SAEnum(PriceBasis, name="price_basis"), default=PriceBasis.qty, nullable=False
+    )
     min_order_amount: Mapped[Optional[int]] = mapped_column(Integer)  # копейки
     welcome_text: Mapped[Optional[str]] = mapped_column(Text)
 
@@ -241,14 +250,22 @@ class CategoryAttribute(Base):
 
 
 class PriceTier(Base):
-    """Уровень цены «от N шт». Уровень определяется суммарным количеством всех вариантов товара в корзине."""
+    """
+    Уровень цены. Порог зависит от Tenant.price_basis: qty — min_qty («от 10 шт»
+    товара), amount — min_amount в копейках («от 10 000 ₽» на всю заявку).
+    Второе поле при этом пустое.
+    """
     __tablename__ = "price_tiers"
-    __table_args__ = (UniqueConstraint("tenant_id", "min_qty", name="uq_price_tiers_tenant_min_qty"),)
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "min_qty", name="uq_price_tiers_tenant_min_qty"),
+        UniqueConstraint("tenant_id", "min_amount", name="uq_price_tiers_tenant_min_amount"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), nullable=False)
     label: Mapped[str] = mapped_column(String(50), nullable=False)
-    min_qty: Mapped[int] = mapped_column(Integer, nullable=False)
+    min_qty: Mapped[Optional[int]] = mapped_column(Integer)
+    min_amount: Mapped[Optional[int]] = mapped_column(Integer)
     sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
 

@@ -3,6 +3,9 @@
 прогоняет через app/services/pricing.py. Используется и клиентом (экран
 корзины, отправка заявки), и админкой («Живые корзины»).
 
+Уровни цен — по режиму тенанта (Tenant.price_basis): у каждого товара свой
+по количеству штук или общий на заявку по её сумме (см. pricing.py).
+
 Позиции, которые больше нельзя заказать (вариант скрыт/нет в наличии,
 товар скрыт/удалён), остаются в корзине и подсвечиваются
 (problem=unavailable), но не участвуют ни в уровне цены, ни в итоге —
@@ -10,12 +13,11 @@
 """
 from dataclasses import dataclass
 
-from app.database.models import Cart, Product, Tenant, Variant
+from app.database.models import Cart, PriceBasis, Product, Tenant, Variant
 from app.database.repository.main_repository import Repository
 from app.models.cart_models import CartGroup, CartLine, CartResponse
-from app.models.catalog_models import TierPrice
-from app.services.catalog_service import is_orderable, to_pricing_tiers
-from app.services.pricing import Tier, price_group
+from app.services.catalog_service import is_orderable, tier_price, to_pricing_tiers
+from app.services.pricing import price_group, resolve_amount_tier
 from app.utils.file_storage import file_url
 
 
@@ -38,12 +40,7 @@ class PricedLine:
 class CartView:
     response: CartResponse
     priced_lines: list[PricedLine]
-
-
-def _tier_price(tier: Tier | None) -> TierPrice | None:
-    if tier is None:
-        return None
-    return TierPrice(tier_id=tier.id, label=tier.label, min_qty=tier.min_qty)
+    amount_tier_id: int | None = None  # режим amount: текущий уровень заявки (подсветка на карточке)
 
 
 async def build_cart_view(repo: Repository, tenant: Tenant, cart: Cart | None) -> CartView:
@@ -51,7 +48,8 @@ async def build_cart_view(repo: Repository, tenant: Tenant, cart: Cart | None) -
     variants = await repo.variant.get_many(tenant.id, [item.variant_id for item in items])
     product_ids = list(dict.fromkeys(v.product_id for v in variants.values()))
     products = await repo.product.get_many(tenant.id, product_ids)
-    tiers = to_pricing_tiers(await repo.price_tier.list(tenant.id))
+    basis = tenant.price_basis
+    tiers = to_pricing_tiers(await repo.price_tier.list(tenant.id), basis)
     tables = await repo.price.tables(product_ids)
 
     # группировка по товару в порядке первого добавления
@@ -62,15 +60,30 @@ async def build_cart_view(repo: Repository, tenant: Tenant, cart: Cart | None) -
             continue
         grouped.setdefault(variant.product_id, []).append((item, variant))
 
+    orderable_by_product = {
+        product_id: [(item, variant) for item, variant in rows if is_orderable(variant, products[product_id])]
+        for product_id, rows in grouped.items()
+    }
+    pricing_inputs = [
+        (tables[product_id], [(variant.id, item.qty) for item, variant in orderable_by_product[product_id]])
+        for product_id in grouped
+    ]
+
+    # qty — уровень у каждого товара свой; amount — общий на заявку по её сумме
+    amount_pricing = None
+    if basis == PriceBasis.amount:
+        amount_pricing = resolve_amount_tier(tiers, pricing_inputs)
+        group_prices = amount_pricing.groups
+    else:
+        group_prices = [price_group(tiers, table, lines) for table, lines in pricing_inputs]
+
     groups: list[CartGroup] = []
     priced_lines: list[PricedLine] = []
     blockers: set[str] = set()
     total = total_qty = 0
 
-    for product_id, rows in grouped.items():
+    for (product_id, rows), pricing in zip(grouped.items(), group_prices):
         product = products[product_id]
-        orderable = [(item, variant) for item, variant in rows if is_orderable(variant, product)]
-        pricing = price_group(tiers, tables[product_id], [(variant.id, item.qty) for item, variant in orderable])
         by_variant = {line.variant_id: line for line in pricing.lines}
 
         lines: list[CartLine] = []
@@ -100,14 +113,13 @@ async def build_cart_view(repo: Repository, tenant: Tenant, cart: Cart | None) -
                 problem=problem,
             ))
 
-        next_tier = _tier_price(pricing.next_tier)
         groups.append(CartGroup(
             product_id=product.id,
             product_name=product.name,
             cover_url=file_url(product.photos[0].storage_key) if product.photos else None,
             total_qty=pricing.total_qty,
-            tier=_tier_price(pricing.tier),
-            next_tier=next_tier,
+            tier=tier_price(pricing.tier, basis) if pricing.tier else None,
+            next_tier=tier_price(pricing.next_tier, basis) if pricing.next_tier else None,
             qty_to_next_tier=pricing.qty_to_next_tier,
             subtotal=pricing.subtotal,
             lines=lines,
@@ -121,6 +133,10 @@ async def build_cart_view(repo: Repository, tenant: Tenant, cart: Cart | None) -
         blockers.add("below_min_amount")
 
     response = CartResponse(
+        price_basis=basis,
+        tier=tier_price(amount_pricing.tier, basis) if amount_pricing and amount_pricing.tier and groups else None,
+        next_tier=tier_price(amount_pricing.next_tier, basis) if amount_pricing and amount_pricing.next_tier and groups else None,
+        amount_to_next_tier=amount_pricing.amount_to_next_tier if amount_pricing and groups else None,
         groups=groups,
         total=total,
         total_qty=total_qty,
@@ -130,7 +146,7 @@ async def build_cart_view(repo: Repository, tenant: Tenant, cart: Cart | None) -
         blockers=[b for b in BLOCKERS_ORDER if b in blockers],
         updated_at=cart.updated_at if cart else None,
     )
-    return CartView(response=response, priced_lines=priced_lines)
+    return CartView(response=response, priced_lines=priced_lines, amount_tier_id=amount_pricing.tier.id if amount_pricing and amount_pricing.tier else None)
 
 
 async def cart_qty_by_variant(repo: Repository, member_id: int) -> dict[int, int]:

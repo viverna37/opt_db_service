@@ -149,7 +149,8 @@ class PriceTierRepository:
 
     async def list(self, tenant_id: int) -> Sequence[PriceTier]:
         result = await self.session.execute(
-            select(PriceTier).where(PriceTier.tenant_id == tenant_id).order_by(PriceTier.min_qty)
+            select(PriceTier).where(PriceTier.tenant_id == tenant_id)
+            .order_by(func.coalesce(PriceTier.min_qty, PriceTier.min_amount), PriceTier.id)
         )
         return result.scalars().all()
 
@@ -162,6 +163,12 @@ class PriceTierRepository:
     async def get_by_min_qty(self, tenant_id: int, min_qty: int) -> PriceTier | None:
         result = await self.session.execute(
             select(PriceTier).where(PriceTier.tenant_id == tenant_id, PriceTier.min_qty == min_qty)
+        )
+        return result.scalar_one_or_none()
+
+    async def get_by_min_amount(self, tenant_id: int, min_amount: int) -> PriceTier | None:
+        result = await self.session.execute(
+            select(PriceTier).where(PriceTier.tenant_id == tenant_id, PriceTier.min_amount == min_amount)
         )
         return result.scalar_one_or_none()
 

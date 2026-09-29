@@ -64,6 +64,8 @@ def process_image(content: bytes) -> bytes:
         image = ImageOps.exif_transpose(image)
     except (UnidentifiedImageError, OSError) as exc:
         raise InvalidImage("Не удалось прочитать картинку") from exc
+    if image.mode == "P":  # палитра с прозрачностью (картинки из Excel) — через RGBA, иначе Pillow ругается
+        image = image.convert("RGBA")
     if image.mode not in ("RGB", "RGBA"):
         image = image.convert("RGBA" if "A" in image.getbands() else "RGB")
     image.thumbnail((MAX_IMAGE_SIDE, MAX_IMAGE_SIDE))

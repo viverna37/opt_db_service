@@ -3,7 +3,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
-from app.database.models import StockStatus
+from app.database.models import PriceBasis, StockStatus
 from app.models.catalog_models import TierPrice
 
 
@@ -33,6 +33,11 @@ class CartGroup(BaseModel):
 
 
 class CartResponse(BaseModel):
+    price_basis: PriceBasis
+    # Режим amount: уровень общий на заявку, подсказка «ещё N ₽ до цены …»
+    tier: Optional[TierPrice] = None
+    next_tier: Optional[TierPrice] = None
+    amount_to_next_tier: Optional[int] = None
     groups: list[CartGroup]
     total: int
     total_qty: int

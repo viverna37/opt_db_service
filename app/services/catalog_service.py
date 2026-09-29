@@ -10,12 +10,13 @@ from app.database.models import (
     AttributeScope,
     AttributeType,
     Category,
+    PriceBasis,
     PriceTier,
     StockStatus,
     TgUser,
     Variant,
 )
-from app.models.catalog_models import AttributeValue, CategoryNode
+from app.models.catalog_models import AttributeValue, CategoryNode, TierPrice
 from app.services.pricing import Tier
 from app.utils.file_storage import file_url
 
@@ -195,8 +196,23 @@ def is_orderable(variant: Variant, product) -> bool:
 
 # ---------- Прочее ----------
 
-def to_pricing_tiers(tiers: Sequence[PriceTier]) -> list[Tier]:
-    return [Tier(id=t.id, label=t.label, min_qty=t.min_qty) for t in tiers]
+def tier_price(tier: Tier, basis: PriceBasis, amount: int | None = None) -> TierPrice:
+    """Уровень для ответа API: порог кладётся в min_qty или min_amount по режиму тенанта"""
+    return TierPrice(
+        tier_id=tier.id, label=tier.label, amount=amount,
+        min_qty=tier.threshold if basis == PriceBasis.qty else None,
+        min_amount=tier.threshold if basis == PriceBasis.amount else None,
+    )
+
+
+def to_pricing_tiers(tiers: Sequence[PriceTier], basis: PriceBasis = PriceBasis.qty) -> list[Tier]:
+    """Порог уровня по режиму тенанта; уровни без порога этого режима пропускаются"""
+    result = []
+    for t in tiers:
+        threshold = t.min_amount if basis == PriceBasis.amount else t.min_qty
+        if threshold is not None:
+            result.append(Tier(id=t.id, label=t.label, threshold=threshold))
+    return result
 
 
 def contact_url(user: TgUser) -> str:

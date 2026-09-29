@@ -70,14 +70,16 @@ class PriceTierResponse(BaseModel):
 
     id: int
     label: str
-    min_qty: int
+    min_qty: Optional[int] = None  # режим qty
+    min_amount: Optional[int] = None  # режим amount, копейки
     sort_order: int
 
 
 class TierPrice(BaseModel):
     tier_id: int
     label: str
-    min_qty: int
+    min_qty: Optional[int] = None
+    min_amount: Optional[int] = None
     amount: Optional[int] = None
 
 
