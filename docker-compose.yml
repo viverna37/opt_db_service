@@ -1,0 +1,22 @@
+services:
+  opt_catalog_db_service:
+    build:
+      context: .
+      dockerfile: app/Dockerfile
+    env_file:
+      - ./app/.env
+    ports:
+      - "9002:9000"
+    volumes:
+      - catalog_uploads:/app/uploads
+    restart: unless-stopped
+    networks:
+      - backend_net
+
+volumes:
+  catalog_uploads:
+
+networks:
+  backend_net:
+    name: backend_net
+    external: true

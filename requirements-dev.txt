@@ -1,0 +1,5 @@
+# Только для тестов/локальной разработки — не ставится в прод-образ
+# (Dockerfile использует только requirements.txt). Запуск: pytest
+-r requirements.txt
+pytest>=8
+aiosqlite>=0.20

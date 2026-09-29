@@ -1,0 +1,8 @@
+.venv
+app/.env
+.idea
+__pycache__/
+*.pyc
+.pytest_cache/
+uploads/
+samples/
