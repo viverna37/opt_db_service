@@ -28,6 +28,8 @@ for key, value in {
 os.environ["DEV_AUTH"] = "true"
 os.environ["WEBAPP_BASE_URL"] = "https://opt.example.com"
 os.environ["SERVICE_API_KEY"] = "test-service-key"
+os.environ["PLATFORM_ADMIN_IDS"] = "4242"
+os.environ["PLATFORM_BOT_TOKEN"] = "999:PLATFORM"
 os.environ["UPLOADS_DIR"] = tempfile.mkdtemp(prefix="opt_test_uploads_")
 
 import app.database.db as db_module  # noqa: E402

@@ -76,3 +76,27 @@ python -m app.cli seed-demo     [--slug demo] [--owner-telegram-id 123] [--bot-t
 - `GET|PATCH /settings`, `POST /settings/logo`, `GET /audit`
 
 **Бот-сервис**: `GET /v1/service/tenants` (`X-Service-Key`) — тенанты с токенами для вебхуков.
+
+## Прод
+
+Сервер `201.34.158.94`, домен `https://opt.bozdyrevdev.ru` (фронт), API — `/api`.
+Всё в `/opt/opt_catalog`: `docker-compose.yml` (Postgres 16 + API + Caddy с HTTPS),
+`Caddyfile`, `.env` (пароли, создан `deploy/server-init.sh`, в git не хранится).
+
+```bash
+# первичная настройка (один раз)
+ssh root@201.34.158.94 'bash -s' < deploy/server-init.sh opt.bozdyrevdev.ru <telegram id админов>
+# выкатка (сборка фронта + rsync + docker compose up --build)
+DEPLOY_HOST=root@201.34.158.94 deploy/deploy.sh
+# CLI на проде
+ssh root@201.34.158.94 'cd /opt/opt_catalog && docker compose exec api python -m app.cli ...'
+```
+
+## Платформа (владелец сервиса)
+
+Оптовики заводятся в мини-аппе, раздел `/platform`: список, создание (slug, название,
+токен бота, Telegram id владельца), смена бота/владельца, отключение. Доступ — только
+Telegram id из `PLATFORM_ADMIN_IDS` в `.env`. Токен бота проверяется через `getMe`,
+кнопка меню бота ставится на каталог автоматически (нужен `WEBAPP_BASE_URL`).
+Вход: «Настройки → Платформа» в любом каталоге, где вы сотрудник, иконка в шапке
+каталога или отдельный бот платформы (`PLATFORM_BOT_TOKEN`, кнопка меню на `/platform`).

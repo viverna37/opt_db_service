@@ -55,6 +55,7 @@ class MeResponse(BaseModel):
     role: Role
     status: MemberStatus
     is_staff: bool
+    is_platform_admin: bool  # показывать ли вход в раздел «Платформа»
     access: str
     age_confirmed_at: Optional[datetime] = None
     user: TgUserResponse

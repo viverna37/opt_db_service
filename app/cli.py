@@ -18,11 +18,10 @@ from app.database.db import db
 from app.database.models import (
     AttributeScope,
     AttributeType,
-    MemberStatus,
-    Role,
     StockStatus,
 )
 from app.database.repository.main_repository import Repository
+from app.services.tenant_service import make_owner, slug_problem
 
 
 async def _with_repo(action, *args):
@@ -45,6 +44,8 @@ async def _tenant(repo: Repository, slug: str):
 
 
 async def create_tenant(repo: Repository, args) -> None:
+    if problem := slug_problem(args.slug):
+        sys.exit(f"Некорректный slug: {problem}")
     if await repo.tenant.get_by_slug(args.slug):
         sys.exit(f"Тенант {args.slug} уже есть")
     tenant = await repo.tenant.create(slug=args.slug, name=args.name, bot_token=args.bot_token,
@@ -58,21 +59,9 @@ async def set_bot(repo: Repository, args) -> None:
     print(f"Бот тенанта {args.slug} обновлён")
 
 
-async def _make_owner(repo: Repository, tenant, telegram_id: int) -> None:
-    """Прежний владелец (если был) становится admin — владелец у тенанта один"""
-    tg_user = await repo.tg_user.upsert(telegram_id, {})
-    for staff in await repo.tenant_user.list_staff(tenant.id):
-        if staff.role == Role.owner and staff.tg_user_id != tg_user.id:
-            staff.role = Role.admin
-    member = await repo.tenant_user.get_by_tg_user(tenant.id, tg_user.id)
-    if member is None:
-        member = await repo.tenant_user.create(tenant.id, tg_user.id, Role.owner, MemberStatus.active)
-    member.role, member.status = Role.owner, MemberStatus.active
-
-
 async def set_owner(repo: Repository, args) -> None:
     tenant = await _tenant(repo, args.slug)
-    await _make_owner(repo, tenant, args.telegram_id)
+    await make_owner(repo, tenant, args.telegram_id)
     print(f"telegram_id={args.telegram_id} — владелец тенанта {args.slug}")
 
 
@@ -149,7 +138,7 @@ async def seed_demo(repo: Repository, args) -> None:
     await product("Картридж Charon Baby", coils, "Smoant", {}, [28000, 27000, 26000], [])
 
     if args.owner_telegram_id:
-        await _make_owner(repo, tenant, args.owner_telegram_id)
+        await make_owner(repo, tenant, args.owner_telegram_id)
     print(f"Демо-тенант создан: slug={args.slug} id={tenant.id}")
 
 

@@ -52,6 +52,14 @@ async def get_tenant(
 
 
 # ---------- Идентификация ----------
+def _validate_account(init_data: str, bot_token: str, config: Config) -> dict:
+    """Проверенная подписью initData -> аккаунт Telegram (id, имя, username, фото)"""
+    fields = validate_webapp_init_data(init_data, bot_token, config.auth.init_data_max_age_sec)
+    account = json.loads(fields["user"])
+    account["id"] = int(account["id"])
+    return account
+
+
 def _account_from_headers(
     tenant: Tenant, x_init_data: Optional[str], x_tg_user_id: Optional[int], config: Config,
 ) -> dict:
@@ -67,10 +75,7 @@ def _account_from_headers(
         if not tenant.bot_token:
             raise api_error(status.HTTP_401_UNAUTHORIZED, "bot_not_configured", "У каталога не настроен бот")
         try:
-            fields = validate_webapp_init_data(x_init_data, tenant.bot_token, config.auth.init_data_max_age_sec)
-            account = json.loads(fields["user"])
-            account["id"] = int(account["id"])
-            return account
+            return _validate_account(x_init_data, tenant.bot_token, config)
         except (InitDataError, KeyError, ValueError, TypeError) as exc:
             raise api_error(status.HTTP_401_UNAUTHORIZED, "invalid_init_data", f"Невалидная initData: {exc}")
     if config.auth.dev_auth and x_tg_user_id:
@@ -137,6 +142,47 @@ async def get_admin(member: TenantUser = Depends(get_staff)) -> TenantUser:
     if member.role not in (Role.owner, Role.admin):
         raise api_error(status.HTTP_403_FORBIDDEN, "forbidden", "Действие доступно только администратору")
     return member
+
+
+# ---------- Владелец платформы ----------
+async def get_platform_admin(
+    x_tenant: Optional[str] = Header(None, alias="X-Tenant"),
+    x_init_data: Optional[str] = Header(None, alias="X-Init-Data"),
+    x_tg_user_id: Optional[int] = Header(None, alias="X-Tg-User-Id"),
+    repo: Repository = Depends(get_repository),
+    config: Config = Depends(get_config),
+) -> int:
+    """
+    Суперадмин платформы — Telegram id из PLATFORM_ADMIN_IDS (только конфиг).
+    initData принимается от «бота платформы» (PLATFORM_BOT_TOKEN) или, если
+    раздел открыт из каталога оптовика (X-Tenant), — от бота этого оптовика.
+    Возвращает telegram_id.
+    """
+    account: dict | None = None
+    if x_init_data:
+        tokens = [config.platform.bot_token] if config.platform.bot_token else []
+        if x_tenant:
+            tenant = await repo.tenant.get_by_slug(x_tenant)
+            if tenant and tenant.bot_token:
+                tokens.append(tenant.bot_token)
+        for token in tokens:
+            try:
+                account = _validate_account(x_init_data, token, config)
+                break
+            except (InitDataError, KeyError, ValueError, TypeError):
+                continue
+        if account is None:
+            raise api_error(status.HTTP_401_UNAUTHORIZED, "invalid_init_data", "Невалидная initData")
+    elif config.auth.dev_auth and x_tg_user_id:
+        account = {"id": x_tg_user_id}
+    else:
+        raise api_error(status.HTTP_401_UNAUTHORIZED, "auth_required", "Нужен заголовок X-Init-Data")
+
+    if account["id"] not in config.platform.admin_ids:
+        raise api_error(status.HTTP_403_FORBIDDEN, "forbidden", "Раздел доступен только владельцу платформы")
+    await repo.tg_user.upsert(account["id"], account)
+    await repo.commit()
+    return account["id"]
 
 
 # ---------- Server-to-server ----------

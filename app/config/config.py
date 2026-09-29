@@ -50,11 +50,24 @@ class TelegramConfig:
 
 
 @dataclass
+class PlatformConfig:
+    """
+    Владелец платформы (тот, кто заводит оптовиков). admin_ids — Telegram id
+    суперадминов: задаются только здесь, через API их не назначить.
+    bot_token — необязательный «бот платформы»: из его мини-аппа открывается
+    /platform. Без него раздел открывается из бота любого оптовика.
+    """
+    admin_ids: frozenset[int]
+    bot_token: str
+
+
+@dataclass
 class Config:
     """Просто сбор в кучу"""
     db: DbConfig
     auth: AuthConfig
     telegram: TelegramConfig
+    platform: PlatformConfig
     uploads_dir: str
     # Ключ для server-to-server вызовов бот-сервиса (/v1/service/*). Пусто — ручки выключены.
     service_api_key: str
@@ -78,6 +91,10 @@ def load_config(path: str | None = None) -> Config:
         telegram=TelegramConfig(
             api_base_url=env.str("TELEGRAM_API_BASE_URL", "https://api.telegram.org").rstrip("/"),
             webapp_base_url=env.str("WEBAPP_BASE_URL", "").rstrip("/"),
+        ),
+        platform=PlatformConfig(
+            admin_ids=frozenset(int(x) for x in env.list("PLATFORM_ADMIN_IDS", []) if str(x).strip()),
+            bot_token=env.str("PLATFORM_BOT_TOKEN", ""),
         ),
         uploads_dir=env.str("UPLOADS_DIR", "/app/uploads"),
         service_api_key=env.str("SERVICE_API_KEY", ""),

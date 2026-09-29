@@ -12,6 +12,7 @@ from app.routers.catalog_router import router as catalog_router
 from app.routers.health import router as health_router
 from app.routers.me_router import router as me_router
 from app.routers.order_router import router as order_router
+from app.routers.platform_router import router as platform_router
 from app.routers.public_router import router as public_router
 from app.routers.service_router import router as service_router
 
@@ -44,6 +45,7 @@ def create_app() -> FastAPI:
     app.include_router(admin_products_router)
     app.include_router(admin_clients_router)
     app.include_router(admin_settings_router)
+    app.include_router(platform_router)
     app.include_router(service_router)
     return app
 

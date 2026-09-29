@@ -1,0 +1,21 @@
+# Сертификат Let's Encrypt Caddy получает сам, как только DOMAIN резолвится на сервер.
+{$DOMAIN} {
+	encode zstd gzip
+
+	# API: /api/v1/... -> api:9000/v1/...
+	handle_path /api/* {
+		reverse_proxy api:9000
+	}
+
+	# Мини-апп (SPA): неизвестные пути -> index.html. index.html и version.txt
+	# не кэшируем (UpdateChecker сверяет версию), хэшированные ассеты — навсегда.
+	handle {
+		root * /srv/web
+		@assets path /assets/*
+		header @assets Cache-Control "public, max-age=31536000, immutable"
+		@pages not path /assets/*
+		header @pages Cache-Control "no-cache"
+		try_files {path} /index.html
+		file_server
+	}
+}
