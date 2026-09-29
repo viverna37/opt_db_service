@@ -32,6 +32,18 @@ services:
     # несколько воркеров отправляли бы каждое сообщение по нескольку раз.
     restart: unless-stopped
 
+  # Бот-сервис (opt_catalog_tg_service): боты всех оптовиков + бот платформы,
+  # вебхуки https://{DOMAIN}/bot/{slug} через Caddy
+  bot:
+    build:
+      context: ./bot
+    env_file: .env
+    environment:
+      API_URL: http://api:9000
+    depends_on:
+      - api
+    restart: unless-stopped
+
   caddy:
     image: caddy:2
     env_file: .env
@@ -46,6 +58,7 @@ services:
       - caddy_config:/config
     depends_on:
       - api
+      - bot
     restart: unless-stopped
 
 volumes:

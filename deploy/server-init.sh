@@ -20,7 +20,8 @@ POSTGRES_DB=opt_catalog
 LOG_LEVEL=INFO
 DEV_AUTH=false
 INIT_DATA_MAX_AGE_SEC=86400
-TELEGRAM_API_BASE_URL=https://api.telegram.org
+# Прокси-воркер Cloudflare — с хостинга api.telegram.org доступен ненадёжно
+TELEGRAM_API_BASE_URL=https://lingering-mountain-4634.egorilyasov2006.workers.dev
 WEBAPP_BASE_URL=https://$DOMAIN
 SERVICE_API_KEY=$(rand 40)
 PLATFORM_ADMIN_IDS=$ADMINS

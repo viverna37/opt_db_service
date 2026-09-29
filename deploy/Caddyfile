@@ -7,6 +7,11 @@
 		reverse_proxy api:9000
 	}
 
+	# Вебхуки Telegram -> бот-сервис (путь не срезаем: /bot/{slug})
+	handle /bot/* {
+		reverse_proxy bot:8080
+	}
+
 	# Мини-апп (SPA): неизвестные пути -> index.html. index.html и version.txt
 	# не кэшируем (UpdateChecker сверяет версию), хэшированные ассеты — навсегда.
 	handle {
