@@ -61,6 +61,10 @@ PACKAGING_RE = re.compile(r"\d+\s*ШТ\s+В\s+УПАКОВКЕ", re.IGNORECASE)
 class ParsedVariant:
     name: str
     out: bool = False
+    sku: str | None = None
+    prices: dict[int, int] | None = None  # своя цена варианта (если отличается от цены товара)
+    stock_qty: int | None = None  # остаток числом (из учётной системы) — статус считается по порогу «мало»
+    source_name: str | None = None  # полное название строки в выгрузке (для сопоставления с учётной системой)
 
 
 @dataclass
@@ -75,6 +79,11 @@ class ParsedProduct:
     out: bool = False
     mix: bool = False
     image: bytes | None = None
+    sku: str | None = None
+    category_path: list[str] | None = None  # вложенные категории; None — категория = лист
+    images: list[bytes] = field(default_factory=list)  # доп. фото (до 5 на товар вместе с image)
+    source_name: str | None = None
+    stock_qty: int | None = None
 
 
 @dataclass
@@ -87,6 +96,9 @@ class ParsedSheet:
 class ParseResult:
     sheets: list[ParsedSheet]
     warnings: list[str]
+    # Что можно подставить в пустые настройки тенанта из шапки прайса: min_order_amount (руб.),
+    # manager_username, welcome_text
+    tenant_defaults: dict = field(default_factory=dict)
 
     @property
     def products(self) -> list[ParsedProduct]:

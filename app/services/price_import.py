@@ -46,6 +46,7 @@ from app.importer.block_price import RETAIL_THRESHOLD, ParseResult, ParsedProduc
 from app.utils.dt import utcnow
 from app.utils.file_storage import InvalidImage, LocalStorage, build_image_key, process_image
 from app.utils.text import normalize_name
+from app.services.catalog_service import stock_status_from_qty
 
 logger = logging.getLogger(__name__)
 
@@ -127,20 +128,39 @@ async def import_block_price(
             )
             tier_by_threshold[threshold] = tier.id
             stats.tiers_created += 1
-    if RETAIL_THRESHOLD in thresholds and not tenant.min_order_amount:
-        tenant.min_order_amount = RETAIL_THRESHOLD * 100
+    # Пустые настройки тенанта — из шапки прайса (минимальная сумма, менеджер, условия)
+    defaults = parsed.tenant_defaults
+    if not tenant.min_order_amount:
+        if defaults.get("min_order_amount"):
+            tenant.min_order_amount = defaults["min_order_amount"] * 100
+        elif RETAIL_THRESHOLD in thresholds:
+            tenant.min_order_amount = RETAIL_THRESHOLD * 100
+    if not tenant.manager_username and defaults.get("manager_username"):
+        tenant.manager_username = defaults["manager_username"]
+    if not tenant.welcome_text and defaults.get("welcome_text"):
+        tenant.welcome_text = defaults["welcome_text"]
 
-    # --- категории (лист = категория) и бренды ---
-    categories = {normalize_name(c.name): c for c in await repo.category.list(tenant.id) if c.parent_id is None}
-    category_by_sheet: dict[str, Category] = {}
-    for index, sheet in enumerate(parsed.sheets):
-        title = _category_title(sheet.title)
-        category = categories.get(normalize_name(title))
-        if category is None:
-            category = await repo.category.create(tenant.id, name=title, sort_order=index)
-            categories[normalize_name(title)] = category
-            stats.categories_created += 1
-        category_by_sheet[sheet.title] = category
+    # --- категории: лист прайса или путь из группы (вложенные), и бренды ---
+    by_parent: dict[tuple[int | None, str], Category] = {
+        (c.parent_id, normalize_name(c.name)): c for c in await repo.category.list(tenant.id)
+    }
+    sort_counter: dict[int | None, int] = {}
+
+    async def category_for(path: list[str]) -> Category:
+        parent: Category | None = None
+        for name in path:
+            key = (parent.id if parent else None, normalize_name(name))
+            category = by_parent.get(key)
+            if category is None:
+                order = sort_counter.get(key[0], 0)
+                category = await repo.category.create(
+                    tenant.id, name=name, parent_id=key[0], sort_order=order,
+                )
+                by_parent[key] = category
+                stats.categories_created += 1
+            sort_counter[key[0]] = sort_counter.get(key[0], 0) + 1
+            parent = category
+        return parent
 
     brands = {normalize_name(b.name): b for b in await repo.brand.list(tenant.id)}
 
@@ -160,14 +180,20 @@ async def import_block_price(
     existing = {(p.category_id, p.name_normalized): p for p in result.scalars().all()}
     seen_ids: set[int] = set()
 
+    sheet_categories = {sheet.title: await category_for([_category_title(sheet.title)]) for sheet in parsed.sheets
+                        if any(p.category_path is None for p in sheet.products)}
     for sheet in parsed.sheets:
-        category = category_by_sheet[sheet.title]
         for index, parsed_product in enumerate(sheet.products):
+            category = (
+                await category_for(parsed_product.category_path) if parsed_product.category_path
+                else sheet_categories[sheet.title]
+            )
             product = existing.get((category.id, normalize_name(parsed_product.name)))
             fields = dict(
                 category_id=category.id,
                 brand_id=await brand_id(parsed_product.brand),
                 description=parsed_product.description,
+                sku=parsed_product.sku,
                 is_visible=True,
                 sort_order=index,
             )
@@ -180,13 +206,14 @@ async def import_block_price(
                 product.updated_at = utcnow()
                 stats.products_updated += 1
             seen_ids.add(product.id)
-            await _sync_variants(repo, tenant, product, parsed_product, stats)
-            await repo.price.replace_for_product(
-                tenant.id, product.id,
-                [(None, tier_by_threshold[t], amount) for t, amount in parsed_product.prices.items()],
-            )
+            variant_ids = await _sync_variants(repo, tenant, product, parsed_product, stats)
+            rows = [(None, tier_by_threshold[t], amount) for t, amount in parsed_product.prices.items()]
+            for parsed_variant, variant_id in zip(parsed_product.variants, variant_ids):
+                for t, amount in (parsed_variant.prices or {}).items():
+                    rows.append((variant_id, tier_by_threshold[t], amount))
+            await repo.price.replace_for_product(tenant.id, product.id, rows)
             if storage is not None and parsed_product.image:
-                await _maybe_add_photo(repo, tenant, product, parsed_product.image, storage, stats)
+                await _maybe_add_photo(repo, tenant, product, [parsed_product.image, *parsed_product.images], storage, stats)
 
     if hide_missing:
         for product in existing.values():
@@ -202,14 +229,19 @@ async def import_block_price(
     return stats
 
 
-async def _sync_variants(repo: Repository, tenant: Tenant, product: Product, parsed: ParsedProduct, stats: ImportStats) -> None:
+async def _sync_variants(repo: Repository, tenant: Tenant, product: Product, parsed: ParsedProduct,
+                         stats: ImportStats) -> list[int]:
+    """Возвращает id вариантов в порядке parsed.variants (для своих цен вариантов)"""
     result = await repo.session.execute(select(Variant).where(Variant.product_id == product.id))
     variants = list(result.scalars().all())
     default = next((v for v in variants if v.is_default), None)
     named = {normalize_name(v.name): v for v in variants if not v.is_default and v.name}
 
-    def set_stock(variant: Variant, out: bool) -> None:
-        if variant.stock_qty is None:  # остаток числом ведут вручную — наличие из прайса не трогаем
+    def set_stock(variant: Variant, out: bool, stock_qty: int | None = None) -> None:
+        if stock_qty is not None:  # остаток из учётной системы — статус по порогу «мало»
+            variant.stock_qty = stock_qty
+            variant.stock_status = stock_status_from_qty(stock_qty, tenant.low_stock_threshold)
+        elif variant.stock_qty is None:  # остаток числом ведут вручную — наличие из прайса не трогаем
             variant.stock_status = StockStatus.out if out else StockStatus.in_stock
 
     if default is None:
@@ -217,15 +249,16 @@ async def _sync_variants(repo: Repository, tenant: Tenant, product: Product, par
 
     if not parsed.variants:
         default.is_visible = True
-        set_stock(default, parsed.out)
+        set_stock(default, parsed.out, parsed.stock_qty)
         for variant in named.values():
             if variant.is_visible:
                 variant.is_visible = False
                 stats.variants_hidden += 1
-        return
+        return []
 
     default.is_visible = False
     keep: set[int] = set()
+    ordered_ids: list[int] = []
     for index, parsed_variant in enumerate(parsed.variants):
         key = normalize_name(parsed_variant.name)
         variant = named.get(key)
@@ -235,25 +268,31 @@ async def _sync_variants(repo: Repository, tenant: Tenant, product: Product, par
             stats.variants_created += 1
         variant.is_visible = True
         variant.sort_order = index
-        set_stock(variant, parsed_variant.out or parsed.out)
+        if parsed_variant.sku:
+            variant.sku = parsed_variant.sku
+        set_stock(variant, parsed_variant.out or parsed.out, parsed_variant.stock_qty)
         keep.add(variant.id)
+        ordered_ids.append(variant.id)
     for variant in named.values():
         if variant.id not in keep and variant.is_visible:
             variant.is_visible = False
             stats.variants_hidden += 1
+    return ordered_ids
 
 
-async def _maybe_add_photo(repo: Repository, tenant: Tenant, product: Product, image: bytes,
+async def _maybe_add_photo(repo: Repository, tenant: Tenant, product: Product, images: list[bytes],
                            storage: LocalStorage, stats: ImportStats) -> None:
+    """Фото из прайса — только товару без фото (загруженные вручную не трогаем), до 5 штук"""
     count = (await repo.session.execute(select(ProductPhoto.id).where(ProductPhoto.product_id == product.id))).all()
     if count:
         return
-    try:
-        content = process_image(image)
-    except InvalidImage:
-        stats.photo_errors += 1
-        return
-    key = build_image_key(tenant.id, f"products/{product.id}")
-    storage.save(key, content)
-    await repo.photo.create(product.id, key, 0)
-    stats.photos_added += 1
+    for order, image in enumerate(images[:5]):
+        try:
+            content = process_image(image)
+        except InvalidImage:
+            stats.photo_errors += 1
+            continue
+        key = build_image_key(tenant.id, f"products/{product.id}")
+        storage.save(key, content)
+        await repo.photo.create(product.id, key, order)
+        stats.photos_added += 1

@@ -7,6 +7,7 @@ CLI для того, что не делается из мини-аппа: зав
     python -m app.cli set-owner --slug amigo --telegram-id 123456789
     python -m app.cli seed-demo --slug demo --owner-telegram-id 123456789
     python -m app.cli import-price --slug amigo --file "AMIGO OPT.xlsx" [--wipe] [--no-photos] [--dry-run]
+    python -m app.cli import-price --slug galactica --file "Галактика_Прайс.xls"   # формат определяется сам
 
 В докере: docker compose exec opt_catalog_db_service python -m app.cli ...
 """
@@ -144,19 +145,30 @@ async def seed_demo(repo: Repository, args) -> None:
 
 
 async def import_price(repo: Repository, args) -> None:
-    """Блочный прайс (формат Amigo Opt) -> каталог тенанта, см. app/services/price_import.py"""
-    from app.importer.block_price import parse_workbook
+    """Прайс (блочный формат Amigo или табличная выгрузка МойСклад) -> каталог тенанта, см. app/services/price_import.py"""
+    from app.importer.detect import parse_price_file
     from app.services.price_import import ImportError_, import_block_price
     from app.utils.file_storage import LocalStorage
 
     tenant = await _tenant(repo, args.slug)
     with open(args.file, "rb") as f:
-        parsed = parse_workbook(f.read(), with_images=not args.no_photos)
+        kind, parsed = parse_price_file(f.read(), args.file, with_images=not args.no_photos)
     products = parsed.products
-    print(f"Разобрано: листов {len(parsed.sheets)}, товаров {len(products)}, "
+    print(f"Формат: {'табличная выгрузка' if kind == 'table' else 'блочный прайс'}. "
+          f"Разобрано: разделов {len(parsed.sheets)}, товаров {len(products)}, "
           f"вариантов {sum(len(p.variants) for p in products)}, фото {sum(1 for p in products if p.image)}")
     for warning in parsed.warnings:
         print(f"  ! {warning}")
+    public_id = parsed.tenant_defaults.get("moysklad_public_id")
+    if public_id and not getattr(args, "no_enrich", False):
+        from app.importer.moysklad_catalog import enrich_from_moysklad
+
+        try:
+            enrich = await enrich_from_moysklad(parsed, public_id, with_photos=not args.no_photos)
+            print(f"Каталог МойСклад {public_id}: сопоставлено {enrich['matched']}, "
+                  f"не найдено {enrich['unmatched']}, фото {enrich['photos']}")
+        except Exception as exc:
+            print(f"  ! Каталог МойСклад недоступен ({exc}) — без остатков и фото")
     if args.dry_run:
         print("--dry-run: в базу ничего не записано")
         return
@@ -208,6 +220,7 @@ def main() -> None:
     p.add_argument("--wipe", action="store_true", help="удалить весь каталог тенанта перед импортом")
     p.add_argument("--no-photos", action="store_true")
     p.add_argument("--dry-run", action="store_true", help="только разобрать и показать итог")
+    p.add_argument("--no-enrich", action="store_true", help="не подтягивать фото/остатки из публичного каталога МойСклад")
     p.set_defaults(action=import_price)
 
     args = parser.parse_args()
