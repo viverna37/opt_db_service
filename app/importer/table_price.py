@@ -28,6 +28,15 @@ TYPE_HEADERS = {"тип"}
 NAME_HEADERS = {"наименование"}
 CODE_HEADERS = {"код товара модификации", "код", "артикул", "код товара"}
 TIER_HEADER_RE = re.compile(r"^от\s*([\d\s.,]+)\s*(тыс|млн|₽|руб|р)?\.?$", re.IGNORECASE)
+# «ОПТ 5к» / «ОПТ 25к» / «ОПТ 150к» — уровни по сумме заявки в тысячах
+OPT_K_RE = re.compile(r"^опт\s*([\d.,]+)\s*(к|тыс|млн)\.?$", re.IGNORECASE)
+STOCK_HEADERS = {"остаток", "остатки", "в наличии", "наличие"}
+# Пометки в конце названия — не вкус: «… (Арбуз) (топ)», «… (акция)»
+TAG_RE = re.compile(r"\s*\((топ|акция|хит|sale|new|новинка[^()]*)\)\s*$", re.IGNORECASE)
+TAG_LABELS = {"топ": "Топ продаж", "акция": "Акция", "хит": "Хит", "sale": "Акция", "new": "Новинка"}
+EMOJI_RE = re.compile("[\U0001F000-\U0001FFFF\u2600-\u27BF\uFE0F]")
+# «a/b» — разделитель пути; «Испарители / Картриджи» (с пробелами) — часть названия группы
+PATH_SPLIT_RE = re.compile(r"(?<!\s)/(?!\s)")
 HOT_RE = re.compile(r"\s*[-–—]\s*горячее предложение!?\s*$", re.IGNORECASE)
 NUMBER_PREFIX_RE = re.compile(r"^\s*\d+\.\s*")
 NEW_MARK_RE = re.compile(r"\s*\((?:новинка|new)[^()]*\)\s*", re.IGNORECASE)
@@ -83,19 +92,19 @@ def _number(value) -> float | None:
 
 
 def _threshold(label: str) -> int | None:
-    """«От 20 тыс» -> 20000, «От 1 млн» -> 1000000, «От 3 000 ₽» -> 3000"""
-    m = TIER_HEADER_RE.match(label.strip())
+    """«От 20 тыс» -> 20000, «От 1 млн» -> 1000000, «От 3 000 ₽» -> 3000, «ОПТ 5к» -> 5000"""
+    m = TIER_HEADER_RE.match(label.strip()) or OPT_K_RE.match(label.strip())
     if not m:
         return None
     number = float(m.group(1).replace(" ", "").replace(",", "."))
     unit = (m.group(2) or "").lower()
-    return int(number * (1000 if unit == "тыс" else 1_000_000 if unit == "млн" else 1))
+    return int(number * (1000 if unit in ("тыс", "к") else 1_000_000 if unit == "млн" else 1))
 
 
 def find_header(grid: list[list]) -> dict | None:
     """Строка заголовков таблицы и номера колонок; None — это не табличный прайс"""
     for r, row in enumerate(grid[:40]):
-        texts = [_text(v).lower() for v in row]
+        texts = [_text(v).lower().strip(" .:") for v in row]
         name_cols = [c for c, t in enumerate(texts) if t in NAME_HEADERS]
         tiers = {c: _threshold(_text(v)) for c, v in enumerate(row) if _threshold(_text(v))}
         if name_cols and tiers:
@@ -107,7 +116,8 @@ def find_header(grid: list[list]) -> dict | None:
                         type_col = c
                     if t in CODE_HEADERS and code_col is None:
                         code_col = c
-            return {"row": r, "name": name_cols[-1], "tiers": tiers, "type": type_col, "code": code_col}
+            stock_col = next((c for c, t in enumerate(texts) if t in STOCK_HEADERS), None)
+            return {"row": r, "name": name_cols[-1], "tiers": tiers, "type": type_col, "code": code_col, "stock": stock_col}
     return None
 
 
@@ -123,8 +133,18 @@ def is_table_price(content: bytes, filename: str) -> bool:
 
 def _clean_segment(text: str) -> tuple[str, bool]:
     hot = bool(HOT_RE.search(text))
+    text = EMOJI_RE.sub("", text)
     text = HOT_RE.sub("", NUMBER_PREFIX_RE.sub("", text)).strip()
-    return text, hot
+    return re.sub(r"\s+", " ", text), hot
+
+
+def _strip_tags(name: str) -> tuple[str, list[str]]:
+    """«… (Арбуз) (топ)» -> («… (Арбуз)», ["Топ продаж"])"""
+    tags = []
+    while m := TAG_RE.search(name):
+        tags.append(TAG_LABELS.get(m.group(1).lower().split()[0], m.group(1)))
+        name = name[: m.start()].rstrip()
+    return name, tags
 
 
 def _category_name(segment: str) -> str:
@@ -132,7 +152,10 @@ def _category_name(segment: str) -> str:
     letters = [ch for ch in segment if ch.isalpha()]
     upper = sum(1 for ch in letters if ch.isupper())
     if letters and upper / len(letters) >= 0.5:
-        return segment[:1].upper() + segment[1:].lower()
+        # «SALT РФ» -> «Salt РФ»: короткие аббревиатуры (до 3 букв) оставляем как есть
+        words = [w if len(w) <= 3 and w.isupper() and i else w.lower() for i, w in enumerate(segment.split(" "))]
+        text = " ".join(words)
+        return text[:1].upper() + text[1:]
     return segment
 
 
@@ -165,12 +188,16 @@ def parse_table(content: bytes, filename: str) -> ParseResult:
         raise ValueError("Не нашёл строку заголовков с «Наименование» и уровнями цен «От …»")
     warnings: list[str] = []
     name_col, type_col, code_col, tier_cols = header["name"], header["type"], header["code"], header["tiers"]
+    stock_col = header.get("stock")
 
     # Шапка над таблицей: условия и контакты
     head_text = "\n".join(_text(v) for row in grid[: header["row"]] for v in row if _text(v))
     defaults: dict = {}
     if m := MIN_ORDER_RE.search(head_text):
         defaults["min_order_amount"] = int(re.sub(r"\s", "", m.group(1)))
+    elif tier_cols:
+        # «ОПТ 5к / 25к / 150к»: ниже младшего уровня опта нет — он и есть минимальная заявка
+        defaults["min_order_amount"] = min(tier_cols.values())
     tg = [m.group(1) for link in links if (m := TG_RE.search(link or ""))]
     if tg:
         defaults["manager_username"] = tg[0]
@@ -183,30 +210,45 @@ def parse_table(content: bytes, filename: str) -> ParseResult:
 
     groups: list[dict] = []  # {path, brand, hot, rows}
     current: dict | None = None
+    def cell(row, col) -> str:
+        return _text(row[col]) if col is not None and col < len(row) else ""
+
     for r in range(header["row"] + 1, len(grid)):
         row = grid[r]
-        name = _text(row[name_col]) if name_col < len(row) else ""
-        row_type = _text(row[type_col]) if type_col is not None and type_col < len(row) else ""
-        if not name:
-            continue
-        if not row_type and "/" in name:
-            segments = [s for s in name.split("/") if s.strip()]
-            if segments and segments[0].strip().lower() in {"товары", "products"}:
-                segments = segments[1:]
-            cleaned = [_clean_segment(s) for s in segments]
-            current = {"segments": [c[0] for c in cleaned], "hot": any(c[1] for c in cleaned), "rows": []}
-            groups.append(current)
-            continue
-        if current is None:
-            current = {"segments": [], "hot": False, "rows": []}
-            groups.append(current)
+        name = cell(row, name_col)
+        row_type = cell(row, type_col)
         prices = {}
         for col, threshold in tier_cols.items():
             value = _number(row[col]) if col < len(row) else None
             if value and value > 0:
                 prices[threshold] = round(value * 100)
-        code = _text(row[code_col]) if code_col is not None and code_col < len(row) else ""
-        current["rows"].append({"r": r + 1, "type": row_type.lower(), "name": name, "code": code or None, "prices": prices})
+        # строка-группа: путь «Товары/1. ЖЕЛЕЗО/…» — в «Наименовании» или (1С-выгрузки) в колонке кода
+        path = name if (not row_type and "/" in name and not prices) else ""
+        if not path and not name and "/" in cell(row, code_col):
+            path = cell(row, code_col)
+        if path:
+            segments = [s for s in PATH_SPLIT_RE.split(path) if s.strip()]
+            if segments and segments[0].strip().lower() in {"товары", "products"}:
+                segments = segments[1:]
+            cleaned = [_clean_segment(s) for s in segments]
+            current = {"segments": [c[0] for c in cleaned if c[0]], "hot": any(c[1] for c in cleaned), "rows": []}
+            groups.append(current)
+            continue
+        if not name:
+            continue
+        if current is None:
+            current = {"segments": [], "hot": False, "rows": []}
+            groups.append(current)
+        code = cell(row, code_col)
+        stock = _number(row[stock_col]) if stock_col is not None and stock_col < len(row) else None
+        name, tags = _strip_tags(EMOJI_RE.sub("", name).strip())
+        if type_col is None:
+            # без колонки «Тип»: вкус/цвет — в последних скобках названия
+            row_type = "модификация" if name.endswith(")") else "товар"
+        current["rows"].append({
+            "r": r + 1, "type": row_type.lower(), "name": name, "code": code or None, "prices": prices,
+            "stock": int(stock) if stock is not None else None, "tags": tags, "code_is_variant": type_col is None,
+        })
 
     brand_names: dict[str, str] = {}
     sheets: dict[str, ParsedSheet] = {}
@@ -219,7 +261,7 @@ def parse_table(content: bytes, filename: str) -> ParseResult:
         if brand_idx is not None:
             key = segments[brand_idx].lower().replace(" ", "")
             brand = brand_names.setdefault(key, segments[brand_idx])
-        category_path = [_category_name(s) for s in (segments[:brand_idx] if brand_idx is not None else segments)]
+        category_path = [_category_name(s) for s in (segments[:brand_idx] if brand_idx is not None else segments)][:3]
         if not category_path:
             category_path = ["Каталог"]
         sheet = sheets.setdefault(category_path[0], ParsedSheet(title=category_path[0], products=[]))
@@ -251,25 +293,35 @@ def _group_products(group: dict, brand: str | None, category_path: list[str], wa
             notes.append("Новинка")
         if group["hot"]:
             notes.append("Горячее предложение")
+        notes.extend(t for t in row.get("tags", []) if t not in notes)
         return ParsedProduct(
             sheet=category_path[0], row=row["r"], name=clean, brand=brand, prices=dict(row["prices"]),
             description=" · ".join(notes) or None, sku=sku, category_path=category_path, source_name=row["name"],
+            stock_qty=row.get("stock"),
         )
 
     # «Модификация»: склейка по коду (или по названию без скобок)
     by_key: dict[str, ParsedProduct] = {}
     for row in [r for r in rows if r["type"].startswith("модиф")]:
         base, variant = _split_last_parens(row["name"])
-        key = row["code"] or base.lower()
+        # код — общий у модификаций товара (МойСклад) или свой у каждой строки (1С): тогда склеиваем по названию
+        key = base.lower() if row.get("code_is_variant") or not row["code"] else row["code"]
         product = by_key.get(key)
         if product is None:
-            product = make(base, row["code"], row)
+            product = make(base, None if row.get("code_is_variant") else row["code"], row)
             by_key[key] = product
             products.append(product)
+        else:
+            for tag in row.get("tags", []):
+                if tag not in (product.description or ""):
+                    product.description = " · ".join(filter(None, [product.description, tag]))
         if variant:
             vname, _ = _clean_name(variant)
             vname = re.sub(r"^new colou?r\s+", "", vname, flags=re.IGNORECASE)
-            product.variants.append(ParsedVariant(name=vname or variant, prices=dict(row["prices"]), source_name=row["name"]))
+            product.variants.append(ParsedVariant(
+                name=vname or variant, prices=dict(row["prices"]), source_name=row["name"], stock_qty=row.get("stock"),
+                sku=row["code"] if row.get("code_is_variant") else None,
+            ))
 
     # «Товар»: склейка позиций, отличающихся только сопротивлением
     singles = [r for r in rows if not r["type"].startswith("модиф")]
@@ -297,7 +349,9 @@ def _group_products(group: dict, brand: str | None, category_path: list[str], wa
         base = re.sub(r"\s+([,)])", r"\1", base)
         product = make(base, None, first_row)
         for row, token in items:
-            product.variants.append(ParsedVariant(name=token, prices=dict(row["prices"]), source_name=row["name"]))
+            product.variants.append(ParsedVariant(
+                name=token, prices=dict(row["prices"]), source_name=row["name"], stock_qty=row.get("stock"),
+            ))
         products.append(product)
 
     # цена товара — цена первого варианта; варианты с такой же ценой не храним отдельно
