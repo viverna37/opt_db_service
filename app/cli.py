@@ -154,7 +154,7 @@ async def import_price(repo: Repository, args) -> None:
     with open(args.file, "rb") as f:
         kind, parsed = parse_price_file(f.read(), args.file, with_images=not args.no_photos)
     products = parsed.products
-    kinds = {"table": "табличная выгрузка", "simple": "строка = товар", "merged": "витрина с блоками", "blocks": "блочный прайс"}
+    kinds = {"table": "табличная выгрузка", "simple": "строка = товар", "merged": "витрина с блоками", "grouped": "группы и вкусы", "blocks": "блочный прайс"}
     print(f"Формат: {kinds[kind]}. "
           f"Разобрано: разделов {len(parsed.sheets)}, товаров {len(products)}, "
           f"вариантов {sum(len(p.variants) for p in products)}, фото {sum(1 for p in products if p.image)}")
