@@ -64,6 +64,8 @@ initData токеном бота тенанта, как `taxi_tg_service/api_cli
   `app/importer/table_price.py`, формат определяется сам (`importer/detect.py`).
   Если в шапке есть ссылка на публичный B2B-каталог МойСклада, остатки и фото
   подтягиваются оттуда (`importer/moysklad_catalog.py`).
+  Ещё два формата Google Sheets: «строка = товар» (Дымок, `simple_price.py`) и
+  витрина «товар = блок строк с фото» (Сафари вейп, `merged_price.py`).
 - Хранилище S3 — есть только интерфейс `Storage` и `LocalStorage`.
 - Миграции Alembic — как в такси, таблицы создаются `create_all` при старте.
   Меняешь схему существующей таблицы — пиши ALTER руками.
