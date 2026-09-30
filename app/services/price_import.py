@@ -114,18 +114,30 @@ async def import_block_price(
         await wipe_catalog(repo, tenant)
 
     # --- режим уровней и сами уровни ---
+    # Блочные/табличные прайсы — уровни по сумме заявки (пороги в рублях),
+    # простые «строка = товар» — по количеству штук (пороги в штуках)
+    basis = PriceBasis(parsed.tenant_defaults.get("price_basis", "amount"))
     existing_tiers = list(await repo.price_tier.list(tenant.id))
-    if tenant.price_basis != PriceBasis.amount:
+    if tenant.price_basis != basis:
         if existing_tiers:
-            raise ImportError_("У тенанта уровни цен по количеству — удалите их или запустите с --wipe")
-        tenant.price_basis = PriceBasis.amount
-    thresholds = sorted({t for p in parsed.products for t in p.prices})
-    tier_by_threshold: dict[int, int] = {t.min_amount // 100: t.id for t in existing_tiers if t.min_amount is not None}
+            raise ImportError_("У тенанта уровни цен в другом режиме — удалите их или запустите с --wipe")
+        tenant.price_basis = basis
+    thresholds = sorted({t for p in parsed.products for t in p.prices}
+                        | {t for p in parsed.products for v in p.variants for t in (v.prices or {})})
+    if basis == PriceBasis.amount:
+        tier_by_threshold = {t.min_amount // 100: t.id for t in existing_tiers if t.min_amount is not None}
+    else:
+        tier_by_threshold = {t.min_qty: t.id for t in existing_tiers if t.min_qty is not None}
     for index, threshold in enumerate(thresholds):
         if threshold not in tier_by_threshold:
-            tier = await repo.price_tier.create(
-                tenant.id, label=_tier_label(threshold), min_amount=threshold * 100, sort_order=index,
-            )
+            if basis == PriceBasis.amount:
+                tier = await repo.price_tier.create(
+                    tenant.id, label=_tier_label(threshold), min_amount=threshold * 100, sort_order=index,
+                )
+            else:
+                tier = await repo.price_tier.create(
+                    tenant.id, label=f"от {threshold} шт", min_qty=threshold, sort_order=index,
+                )
             tier_by_threshold[threshold] = tier.id
             stats.tiers_created += 1
     # Пустые настройки тенанта — из шапки прайса (минимальная сумма, менеджер, условия)
@@ -133,7 +145,7 @@ async def import_block_price(
     if not tenant.min_order_amount:
         if defaults.get("min_order_amount"):
             tenant.min_order_amount = defaults["min_order_amount"] * 100
-        elif RETAIL_THRESHOLD in thresholds:
+        elif basis == PriceBasis.amount and RETAIL_THRESHOLD in thresholds:
             tenant.min_order_amount = RETAIL_THRESHOLD * 100
     if not tenant.manager_username and defaults.get("manager_username"):
         tenant.manager_username = defaults["manager_username"]

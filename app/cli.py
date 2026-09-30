@@ -154,7 +154,8 @@ async def import_price(repo: Repository, args) -> None:
     with open(args.file, "rb") as f:
         kind, parsed = parse_price_file(f.read(), args.file, with_images=not args.no_photos)
     products = parsed.products
-    print(f"Формат: {'табличная выгрузка' if kind == 'table' else 'блочный прайс'}. "
+    kinds = {"table": "табличная выгрузка", "simple": "строка = товар", "blocks": "блочный прайс"}
+    print(f"Формат: {kinds[kind]}. "
           f"Разобрано: разделов {len(parsed.sheets)}, товаров {len(products)}, "
           f"вариантов {sum(len(p.variants) for p in products)}, фото {sum(1 for p in products if p.image)}")
     for warning in parsed.warnings:
