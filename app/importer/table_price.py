@@ -30,6 +30,9 @@ CODE_HEADERS = {"код товара модификации", "код", "арт�
 TIER_HEADER_RE = re.compile(r"^от\s*([\d\s.,]+)\s*(тыс|млн|₽|руб|р)?\.?$", re.IGNORECASE)
 # «ОПТ 5к» / «ОПТ 25к» / «ОПТ 150к» — уровни по сумме заявки в тысячах
 OPT_K_RE = re.compile(r"^опт\s*([\d.,]+)\s*(к|тыс|млн)\.?$", re.IGNORECASE)
+# «Мелкий ОПТ» / «Крупный ОПТ» — уровни без порогов в прайсе: ставим условные пороги по сумме
+# заявки (крупный — от 40 000 ₽, как «Поды и расходники от 40т»), владелец поправит в админке
+NAMED_TIERS = {"мелкий опт": (1, "Мелкий опт"), "крупный опт": (40000, "Крупный опт от 40 000 ₽")}
 STOCK_HEADERS = {"остаток", "остатки", "в наличии", "наличие"}
 # Пометки в конце названия — не вкус: «… (Арбуз) (топ)», «… (акция)»
 TAG_RE = re.compile(r"\s*\((топ|акция|хит|sale|new|новинка[^()]*)\)\s*$", re.IGNORECASE)
@@ -93,6 +96,8 @@ def _number(value) -> float | None:
 
 def _threshold(label: str) -> int | None:
     """«От 20 тыс» -> 20000, «От 1 млн» -> 1000000, «От 3 000 ₽» -> 3000, «ОПТ 5к» -> 5000"""
+    if named := NAMED_TIERS.get(re.sub(r"\s+", " ", label.strip().lower())):
+        return named[0]
     m = TIER_HEADER_RE.match(label.strip()) or OPT_K_RE.match(label.strip())
     if not m:
         return None
@@ -135,6 +140,7 @@ def _clean_segment(text: str) -> tuple[str, bool]:
     hot = bool(HOT_RE.search(text))
     text = EMOJI_RE.sub("", text)
     text = HOT_RE.sub("", NUMBER_PREFIX_RE.sub("", text)).strip()
+    text = re.sub(r"\s+от\s+\d+\s*т\.?$", "", text)  # «Поды и расходники от 40т»
     return re.sub(r"\s+", " ", text), hot
 
 
@@ -189,13 +195,17 @@ def parse_table(content: bytes, filename: str) -> ParseResult:
     warnings: list[str] = []
     name_col, type_col, code_col, tier_cols = header["name"], header["type"], header["code"], header["tiers"]
     stock_col = header.get("stock")
+    named_tiers = {
+        NAMED_TIERS[key][0]: NAMED_TIERS[key][1]
+        for c in tier_cols if (key := re.sub(r"\s+", " ", _text(grid[header["row"]][c]).lower())) in NAMED_TIERS
+    }
 
     # Шапка над таблицей: условия и контакты
     head_text = "\n".join(_text(v) for row in grid[: header["row"]] for v in row if _text(v))
     defaults: dict = {}
     if m := MIN_ORDER_RE.search(head_text):
         defaults["min_order_amount"] = int(re.sub(r"\s", "", m.group(1)))
-    elif tier_cols:
+    elif tier_cols and not named_tiers:
         # «ОПТ 5к / 25к / 150к»: ниже младшего уровня опта нет — он и есть минимальная заявка
         defaults["min_order_amount"] = min(tier_cols.values())
     tg = [m.group(1) for link in links if (m := TG_RE.search(link or ""))]
@@ -224,6 +234,10 @@ def parse_table(content: bytes, filename: str) -> ParseResult:
                 prices[threshold] = round(value * 100)
         # строка-группа: путь «Товары/1. ЖЕЛЕЗО/…» — в «Наименовании» или (1С-выгрузки) в колонке кода
         path = name if (not row_type and "/" in name and not prices) else ""
+        # 1С без колонки «Тип» и кода: группа верхнего уровня без «/» («Поды», «Мистери Бокс»)
+        if (not path and name and not prices and type_col is None and code_col is None
+                and "(" not in name and len(name) <= 60):
+            path = name
         if not path and not name and "/" in cell(row, code_col):
             path = cell(row, code_col)
         if path:
@@ -251,12 +265,24 @@ def parse_table(content: bytes, filename: str) -> ParseResult:
         })
 
     brand_names: dict[str, str] = {}
+    # Раздел, где подгруппы почти все латинские бренды («Жидкости/Angry Ape», «Жидкости/BJORN»),
+    # — кириллические подгруппы там тоже бренды («Жидкости/Злая Монашка»), а не подкатегории
+    children: dict[str, set[str]] = {}
+    for group in groups:
+        if len(group["segments"]) >= 2:
+            children.setdefault(group["segments"][0].lower(), set()).add(group["segments"][1])
+    brand_parents = {
+        parent for parent, names in children.items()
+        if len(names) >= 5 and sum(bool(LATIN_RE.match(n)) for n in names) / len(names) >= 0.7
+    }
     sheets: dict[str, ParsedSheet] = {}
     for group in groups:
         segments = group["segments"]
         if segments and segments[0].lower() in SKIP_ROOTS:
             continue
         brand_idx = next((i for i, s in enumerate(segments) if i > 0 and LATIN_RE.match(s)), None)
+        if brand_idx is None and len(segments) == 2 and segments[0].lower() in brand_parents:
+            brand_idx = 1
         brand = None
         if brand_idx is not None:
             key = segments[brand_idx].lower().replace(" ", "")
@@ -276,6 +302,12 @@ def parse_table(content: bytes, filename: str) -> ParseResult:
             seen[key] = seen.get(key, 0) + 1
             if seen[key] > 1:
                 p.name = f"{p.name} #{seen[key]}"
+    if named_tiers:
+        defaults["tier_labels"] = named_tiers
+    for sheet in sheets.values():
+        for product in sheet.products:
+            for variant in product.variants:
+                variant.name = re.sub(r"^\((.*)\)$", r"\1", variant.name).strip()
     return ParseResult(sheets=[s for s in sheets.values() if s.products], warnings=warnings, tenant_defaults=defaults)
 
 

@@ -86,3 +86,32 @@ def test_table_import(client, session_factory, tmp_path):
     h = headers("galactica", 10)
     cart = client.put(f"/v1/cart/items/{gold['id']}", json={"qty": 2}, headers=h).json()
     assert cart["blockers"] == ["below_min_amount"] and cart["total"] == 2 * 199000
+
+
+def test_named_tiers_and_top_level_groups():
+    """1С «Остатки»: «Мелкий ОПТ» / «Крупный ОПТ» без порогов, группы без «/», кириллические бренды"""
+    import openpyxl
+    from io import BytesIO
+    from app.importer.table_price import parse_table
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["Остатки Просто ОПТ"])
+    ws.append(["Наименование", "Мелкий ОПТ", "Крупный ОПТ", "Заказ"])
+    for brand in ("Angry Ape", "BJORN", "DUALL", "SKALA", "OGGO", "Злая Монашка"):
+        ws.append([f"Жидкости/{brand}"])
+        ws.append([f"{brand} Hard (Вишня)", 265, 255])
+        ws.append([f"{brand} Hard (Манго)", 265, 255])
+    ws.append(["Поды и расходники от 40т"])
+    ws.append(["Аккумулятор LG 18650 HG2", 300, 280])
+    buf = BytesIO()
+    wb.save(buf)
+
+    result = parse_table(buf.getvalue(), "ostatki.xlsx")
+    assert result.tenant_defaults["tier_labels"] == {1: "Мелкий опт", 40000: "Крупный опт от 40 000 ₽"}
+    assert "min_order_amount" not in result.tenant_defaults
+    by_name = {p.name: p for p in result.products}
+    monashka = by_name["Злая Монашка Hard"]
+    assert monashka.brand == "Злая Монашка" and monashka.category_path == ["Жидкости"]
+    assert monashka.prices == {1: 26500, 40000: 25500} and [v.name for v in monashka.variants] == ["Вишня", "Манго"]
+    assert by_name["Аккумулятор LG 18650 HG2"].category_path == ["Поды и расходники"]

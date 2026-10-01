@@ -132,7 +132,8 @@ async def import_block_price(
         if threshold not in tier_by_threshold:
             if basis == PriceBasis.amount:
                 tier = await repo.price_tier.create(
-                    tenant.id, label=_tier_label(threshold), min_amount=threshold * 100, sort_order=index,
+                    tenant.id, label=parsed.tenant_defaults.get("tier_labels", {}).get(threshold) or _tier_label(threshold),
+                    min_amount=threshold * 100, sort_order=index,
                 )
             else:
                 tier = await repo.price_tier.create(
