@@ -151,10 +151,15 @@ async def import_price(repo: Repository, args) -> None:
     from app.utils.file_storage import LocalStorage
 
     tenant = await _tenant(repo, args.slug)
-    with open(args.file, "rb") as f:
-        kind, parsed = parse_price_file(f.read(), args.file, with_images=not args.no_photos)
+    if args.file.startswith("https://docs.google.com/spreadsheets/"):
+        from app.importer.gsheet_html import load_gsheet
+
+        kind, parsed = "gsheet", await load_gsheet(args.file, with_images=not args.no_photos)
+    else:
+        with open(args.file, "rb") as f:
+            kind, parsed = parse_price_file(f.read(), args.file, with_images=not args.no_photos)
     products = parsed.products
-    kinds = {"table": "табличная выгрузка", "simple": "строка = товар", "merged": "витрина с блоками", "grouped": "группы и вкусы", "blocks": "блочный прайс"}
+    kinds = {"table": "табличная выгрузка", "simple": "строка = товар", "merged": "витрина с блоками", "grouped": "группы и вкусы", "gsheet": "Google-таблица по ссылке", "blocks": "блочный прайс"}
     print(f"Формат: {kinds[kind]}. "
           f"Разобрано: разделов {len(parsed.sheets)}, товаров {len(products)}, "
           f"вариантов {sum(len(p.variants) for p in products)}, фото {sum(1 for p in products if p.image)}")
@@ -217,7 +222,7 @@ def main() -> None:
 
     p = sub.add_parser("import-price")
     p.add_argument("--slug", required=True)
-    p.add_argument("--file", required=True)
+    p.add_argument("--file", required=True, help="путь к файлу прайса или ссылка на Google-таблицу")
     p.add_argument("--wipe", action="store_true", help="удалить весь каталог тенанта перед импортом")
     p.add_argument("--no-photos", action="store_true")
     p.add_argument("--dry-run", action="store_true", help="только разобрать и показать итог")

@@ -67,6 +67,8 @@ initData токеном бота тенанта, как `taxi_tg_service/api_cli
   Ещё два формата Google Sheets: «строка = товар» (Дымок, `simple_price.py`) и
   витрина «товар = блок строк с фото» (Сафари вейп, `merged_price.py`); выгрузка
   «группа → строки-вкусы» с остатками (Alaska Trade, `grouped_price.py`).
+  `import-price --file <ссылка на Google-таблицу>` — загрузка через htmlview с фото
+  из ячеек (`gsheet_html.py`, формат BESTSALE.OPT); xlsx-экспорт с картинками Google обрывает.
 - Хранилище S3 — есть только интерфейс `Storage` и `LocalStorage`.
 - Миграции Alembic — как в такси, таблицы создаются `create_all` при старте.
   Меняешь схему существующей таблицы — пиши ALTER руками.
